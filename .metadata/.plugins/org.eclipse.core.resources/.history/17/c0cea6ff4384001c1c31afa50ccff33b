@@ -1,0 +1,419 @@
+/**********************************************
+ * File: app.c
+ *
+ *  Created on: 12-01-2022
+ *      Author: <author>
+ *
+ *********************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <container.h>
+#include "defines.h"
+#include <ship.h>
+#include <rocket.h>
+#include <alien.h>
+#include "app.h"
+
+/******** Bits Mask Manipulation Macros ******************/
+#define mBitsSet(f,m)			((f)|=(m))
+#define mBitsClr(f,m)			((f)&=(~(m)))
+#define mBitsTgl(f,m)			((f)^=(m))
+#define mBitsMsk(f,m)			((f)& (m))
+#define mIsBitsSet(f,m)			(((f)&(m))==(m))
+#define mIsBitsClr(f,m)			(((~(f))&(m))==(m))
+
+/******** Animating Callback Function Prototype ******************/
+Uint32 _AppTimerCallback(Uint32 interval, t_app*pApp);
+void _AppGenerateAliens(t_app*pApp);
+
+/********************GRAPHICS FUNCTION*************************/
+int AppGraphicInit(char*appFileImageStr,SDL_Renderer*pRenderer,t_app*pApp);
+int AppGraphicRelease(t_app*pApp);
+
+/*********** Enumerate Application Status Masks Type Definition***********/
+typedef enum e_appFlagsMasks{
+	ST_APP_ALL_CLEARED		= 0x00000000,
+	ST_APP_INIT_FAILED		= 0x80000000,
+	ST_APP_SDL_INITIATED	= 0x00000001,
+	ST_APP_PAUSED			= 0x00000002,
+	ST_APP_WIN				= 0x00000004,
+	ST_APP_LOOSE			= 0x00000008,
+}t_appFlagsMasks;
+
+/*********** Application Structure Definition***********/
+struct s_app{
+	t_appFlagsMasks	 m_uStatus;
+	SDL_Window		*m_pWindow;
+	SDL_Renderer 	*m_pRenderer;
+	SDL_TimerID		 m_timerID;
+	SDL_Surface*	pImageSurface;
+	SDL_Texture*	pImageTexture;
+	/*---------------------------------------------*/
+	SDL_Rect		 m_sceneArea;
+	t_ship			*m_pShip;
+	t_container		*pAliensContainer;
+	t_container		*pRocketsContainer;
+	t_container		*pShipsContainer;
+};
+
+
+/*********** Public Application Function Implementation***********/
+t_app*AppCreate(void){
+
+	t_app*pApp=(t_app*)malloc(sizeof(t_app));
+	if(pApp==NULL) return NULL;
+
+	srand((unsigned int)time(NULL));
+
+
+	*pApp=(t_app){
+		.m_sceneArea=(SDL_Rect){
+			.x = APP_WINDOW_PADDING_HRZ,
+			.y = APP_WINDOW_PADDING_TOP,
+			.w = APP_WINDOW_WIDTH-2*APP_WINDOW_PADDING_HRZ,
+			.h = APP_WINDOW_HEIGHT-APP_WINDOW_PADDING_TOP-APP_WINDOW_PADDING_BOT
+		},
+		.pShipsContainer = ContainerNew((t_ptfV)ShipDestroy),
+		.pAliensContainer = ContainerNew((t_ptfV)AlienDestroy),
+		.pRocketsContainer = ContainerNew((t_ptfV)RocketDestroy),
+	};
+
+	if(SDL_Init(SDL_INIT_VIDEO)!=0){
+		fprintf(stderr,"Failed to initiate SDL: %s\n", SDL_GetError());
+		mBitsSet(pApp->m_uStatus, ST_APP_INIT_FAILED);
+		return pApp;
+	}
+	mBitsSet(pApp->m_uStatus, ST_APP_SDL_INITIATED);
+
+	pApp->m_pWindow=SDL_CreateWindow(
+			APP_WINDOW_TITLE,
+			SDL_WINDOWPOS_CENTERED,
+			SDL_WINDOWPOS_CENTERED,
+			APP_WINDOW_WIDTH,
+			APP_WINDOW_HEIGHT,
+			SDL_WINDOW_SHOWN);
+	if(pApp->m_pWindow==NULL){
+		fprintf(stderr,"Failed to create window: %s\n", SDL_GetError());
+		mBitsSet(pApp->m_uStatus, ST_APP_INIT_FAILED);
+		return pApp;
+	}
+
+	pApp->m_pRenderer=SDL_CreateRenderer(pApp->m_pWindow, -1, SDL_RENDERER_ACCELERATED);
+	if(pApp->m_pRenderer==NULL){
+		fprintf(stderr,"Failed to create ACCELERATED renderer: %s\n", SDL_GetError());
+		pApp->m_pRenderer=SDL_CreateRenderer(pApp->m_pWindow, -1, SDL_RENDERER_SOFTWARE);
+		if(pApp->m_pRenderer==NULL){
+			fprintf(stderr,"Failed to create SOFTWARE renderer: %s\n", SDL_GetError());
+			mBitsSet(pApp->m_uStatus, ST_APP_INIT_FAILED);
+			return pApp;
+		}
+		fprintf(stderr,"Created SOFTWARE renderer instead\n");
+	}
+
+
+	/******************************************************
+	 * ToDo: ship creation
+	 * */
+	AppGraphicInit(APP_WINDOW_IMAGE_FILE_STR,pApp->m_pRenderer,pApp);
+
+	ShipGraphicInit(SHIP_IMAGE_FILE_STR, pApp->m_pRenderer);
+
+	for(int i=0; i<SHIP_LIFE;i++){
+		ContainerPushFront(pApp->pShipsContainer, ShipCreate((SDL_Rect){APP_WINDOW_WIDTH -SHIP_SIZE*i,
+																		APP_WINDOW_HEIGHT - SHIP_SIZE*0.6,
+																		SHIP_SIZE*0.65,
+																		SHIP_SIZE*0.65}, SHIP_COLOR));
+	}
+
+
+	RocketGraphicInit(ROCKETS_IMAGE_FILE_STR,pApp->m_pRenderer);
+	/******************************************************
+	 * ToDo: aliens first creation
+	 * */
+
+	AlienGraphicInit(ALIEN_IMAGE_FILE_STR, pApp->m_pRenderer);
+
+	for(int i=0; i<APP_ALIENS_NB_MAX;i++){
+		ContainerPushFront(pApp->pAliensContainer,AlienCreate((SDL_Rect){ -APP_WINDOW_PADDING_HRZ - (ALIEN_SIZE+ALIEN_SPACING)*i+1,
+																											APP_WINDOW_PADDING_TOP + 5,
+																											ALIEN_SIZE,
+																											ALIEN_SIZE},
+																											ALIEN_SPEED,
+																											ALIEN_COLOR));
+	}
+
+
+
+
+	ShipEngage((t_ship*)ContainerGetBack(pApp->pShipsContainer),&(SDL_Rect){
+																.x = APP_WINDOW_WIDTH/2,
+																.y =APP_WINDOW_HEIGHT -(APP_WINDOW_PADDING_BOT + SHIP_SIZE*2),
+																.w = SHIP_SIZE,
+																.h = SHIP_SIZE});
+
+
+
+
+	return pApp;
+}
+
+t_app*AppDestroy(t_app*pApp){
+	if(pApp==NULL) return NULL;
+
+	 AppGraphicRelease(pApp);
+	/******************************************************
+	 * ToDo: ship destroy
+	 * */
+
+
+	ShipGraphicRelease();
+	ContainerDel(pApp->pShipsContainer);
+
+	/******************************************************
+	 * ToDo: aliens destroy
+	 * */
+
+	AlienGraphicRelease();
+	ContainerDel(pApp->pAliensContainer);
+	/******************************************************
+	 * ToDo: rockets destroy
+	 * */
+
+	RocketGraphicRelease();
+	ContainerDel(pApp->pRocketsContainer);
+
+
+	if(pApp->m_timerID)		SDL_RemoveTimer(pApp->m_timerID);
+	if(pApp->m_pRenderer)	SDL_DestroyRenderer(pApp->m_pRenderer);
+	if(pApp->m_pWindow)		SDL_DestroyWindow(pApp->m_pWindow);
+	if(mIsBitsSet(pApp->m_uStatus, ST_APP_SDL_INITIATED)) SDL_Quit();
+	free(pApp);
+	return NULL;
+}
+
+int AppRun(t_app*pApp){
+	/******************************************************
+	 * ToDo: AppRun() safety entrance filtration
+	 * */
+
+	if(pApp == NULL || mIsBitsSet(pApp->m_uStatus,ST_APP_INIT_FAILED)) return EXIT_FAILURE;
+
+
+	/******************************************************
+	 * ToDo: timer callback mechanism armament
+	 * */
+
+	pApp->m_timerID=SDL_AddTimer(APP_ANIMATE_RATE, (SDL_TimerCallback)  _AppTimerCallback, pApp);
+
+	int iQuit=0;
+	SDL_Event event;
+
+	while(!iQuit){
+		while(SDL_PollEvent(&event)){
+			switch (event.type) {
+			case SDL_MOUSEMOTION:
+				/******************************************************
+				 * ToDo: taking care of mouse ship motion
+				 * */
+				ShipMoveToX((t_ship*)ContainerGetBack(pApp->pShipsContainer), event.motion.x, &pApp->m_sceneArea);
+
+				break;
+			case SDL_KEYDOWN:
+				switch (event.key.keysym.sym) {
+				case SDLK_r:
+					/******************************************************
+					 * ToDo: taking care of aliens regeneration
+					 * */
+					 _AppGenerateAliens(pApp);
+					break;
+				case SDLK_SPACE:{
+					/******************************************************
+					 * ToDo: taking care of ship rockets firing
+					 * */
+
+					ContainerPushFront(pApp->pRocketsContainer,RocketCreate((SDL_Rect){
+																				ShipHotPoint((t_ship*)ContainerGetBack(pApp->pShipsContainer)).x,
+																				ShipHotPoint((t_ship*)ContainerGetBack(pApp->pShipsContainer)).y,
+																				ROCKET_WIDTH,
+																				ROCKET_HEIGHT},
+																				(SDL_Point){0,ROCKET_SPEED},
+																				ROCKET_COLOR));
+					break;
+				}
+				case SDLK_p:
+					/******************************************************
+					 * ToDo: taking care of pausing/un-pausing application
+					 * */
+					mBitsTgl(pApp->m_uStatus,ST_APP_PAUSED);
+
+					break;
+				case SDLK_ESCAPE:
+					event.type=SDL_QUIT;
+					SDL_PushEvent(&event);
+					break;
+				default:
+					break;
+				}
+				break;
+			case SDL_QUIT:
+				iQuit=1;
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	return EXIT_SUCCESS;
+}
+
+
+/******** Animating Callback Function Implementation ******************/
+Uint32 _AppTimerCallback(Uint32 interval, t_app*pApp){
+
+	/******************************************************
+	 * ToDo: taking care of paused/un-paused application
+	 * */
+
+	if(mIsBitsSet(pApp->m_uStatus,ST_APP_PAUSED)) return interval;
+
+	/******************************************************
+	 * ToDo: taking care of loose or win the game
+	 * */
+	if(mIsBitsSet(pApp->m_uStatus,ST_APP_LOOSE)){
+
+		SDL_SetRenderDrawColor(pApp->m_pRenderer, APP_WINDOW_COLOR_BKGND.r,
+													APP_WINDOW_COLOR_BKGND.g,
+													APP_WINDOW_COLOR_BKGND.b,
+													APP_WINDOW_COLOR_BKGND.a);
+		SDL_RenderClear(pApp->m_pRenderer);
+
+		SDL_SetRenderDrawColor(pApp->m_pRenderer,200,0,0,255);
+
+		SDL_RenderFillRect(pApp->m_pRenderer, &pApp->m_sceneArea);
+		SDL_RenderPresent(pApp->m_pRenderer);
+
+		return interval;
+	}
+	/******************************************************
+	 * ToDo: taking care of drawing scene area limits
+		 * */
+	SDL_RenderClear(pApp->m_pRenderer);
+
+	if(pApp->pImageTexture){
+		SDL_RenderCopy(pApp->m_pRenderer,pApp->pImageTexture, NULL, &pApp->m_sceneArea);
+	}
+	else{
+		SDL_SetRenderDrawColor(pApp->m_pRenderer, APP_WINDOW_COLOR_BKGND.r,
+													APP_WINDOW_COLOR_BKGND.g,
+													APP_WINDOW_COLOR_BKGND.b,
+													APP_WINDOW_COLOR_BKGND.a);
+
+
+		SDL_SetRenderDrawColor(pApp->m_pRenderer,APP_WINDOW_COLOR_DELIMITING.r,
+												APP_WINDOW_COLOR_DELIMITING	.g,
+												APP_WINDOW_COLOR_DELIMITING	.b,
+												APP_WINDOW_COLOR_DELIMITING	.a);
+	}
+
+	SDL_RenderDrawRect(pApp->m_pRenderer, &pApp->m_sceneArea);
+
+	/***************************************************************
+	 * 		APPLICATION ENTITIES DRAWING & ANIMATING SECTION
+	 * */
+
+
+	/******************************************************
+	 * ToDo: taking care of drawing the space ship
+	 * */
+
+	ContainerParse(pApp->pShipsContainer, (t_ptfVV)ShipDraw, pApp->m_pRenderer);
+
+
+	/******************************************************
+	 * ToDo: taking care of rockets
+	 * */
+
+	ContainerParse(pApp->pRocketsContainer,(t_ptfVV)RocketDraw, pApp->m_pRenderer);
+	ContainerParseDelIf(pApp->pRocketsContainer,(t_ptfVV)RocketMove, &pApp->m_sceneArea);
+
+	/******************************************************
+	 * ToDo: taking care of aliens
+	 * */
+
+	ContainerParse(pApp->pAliensContainer,(t_ptfVV)AlienDraw, pApp->m_pRenderer);
+	ContainerParseDelIf(pApp->pAliensContainer,(t_ptfVV)AlienMove, &pApp->m_sceneArea);
+
+
+	/******************************************************
+	 * ToDo: taking care of aliens hits by rockets
+	 * */
+
+	ContainerIntersectDelIf(pApp->pRocketsContainer, pApp->pAliensContainer, (t_ptfVV)RocketHit);
+
+
+
+	/************************************************************
+	 * 		RENDERING THE FINAL SCENE
+	 * */
+	SDL_RenderPresent(pApp->m_pRenderer);
+	return interval;
+}
+
+
+
+void _AppGenerateAliens(t_app*pApp){
+	/******************************************************
+	 * ToDo: generating some aliens...
+	 * */
+	if(ContainerCard(pApp->pAliensContainer) == 0){
+		for(int i=0; i<APP_ALIENS_NB_MAX;i++){
+			ContainerPushFront(pApp->pAliensContainer,AlienCreate((SDL_Rect){ -APP_WINDOW_PADDING_HRZ - (ALIEN_SIZE+ALIEN_SPACING)*i+1,
+																											APP_WINDOW_PADDING_TOP + 5,
+																											ALIEN_SIZE,
+																											ALIEN_SIZE},
+																											ALIEN_SPEED,
+																											ALIEN_COLOR));
+		}
+	}
+}
+
+
+/************* SCENE IMAGE ********************/
+
+int AppGraphicInit(char*appFileImageStr,SDL_Renderer*pRenderer,t_app*pApp){
+	pApp->pImageSurface = IMG_Load(appFileImageStr);
+	if(pApp->pImageSurface == NULL){
+		fprintf(stderr,"Failed to load image %s\n",SDL_GetError());
+		return -1;
+	}
+	pApp->pImageTexture = SDL_CreateTextureFromSurface(pRenderer,pApp->pImageSurface );
+	return 0;
+}
+
+int AppGraphicRelease(t_app*pApp){
+
+	if(pApp->pImageTexture){
+		SDL_DestroyTexture(pApp->pImageTexture);
+		pApp->pImageTexture = NULL;
+	}
+	if(pApp->pImageSurface){
+		SDL_FreeSurface(pApp->pImageSurface);
+		pApp->pImageSurface = NULL;
+	}
+	return 0;
+}
+
+
+
+
+
+
+
+
+
+/*<$$$$$$$-BASE-$$$$$$$>*/
